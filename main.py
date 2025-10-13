@@ -1,14 +1,8 @@
 """
-projectile.py
 
 Реализация задачи "Полёт камня" с линейным и квадратичным сопротивлением.
 Конфигурация параметров в начале файла.
 
-Зависимости:
-    numpy, scipy, matplotlib
-
-Пример запуска:
-    python projectile.py
 """
 
 import matplotlib.pyplot as plt
@@ -43,9 +37,9 @@ series = [
 
 
 # -------------------------
-# Функции: RHS для разных моделей
+# Функции: Правая часть для разных моделей
 # -------------------------
-def rhs_none(t, state):
+def rhs_none(_, state):
     """Без сопротивления"""
     x, y, vx, vy = state
     ax = 0.0
@@ -53,7 +47,7 @@ def rhs_none(t, state):
     return [vx, vy, ax, ay]
 
 
-def rhs_linear(t, state, b_coef):
+def rhs_linear(_, state, b_coef):
     x, y, vx, vy = state
     k = b_coef / m
     v = np.hypot(vx, vy)
@@ -63,7 +57,7 @@ def rhs_linear(t, state, b_coef):
     return [vx, vy, ax, ay]
 
 
-def rhs_quadratic(t, state, c_coef):
+def rhs_quadratic(_, state, c_coef):
     x, y, vx, vy = state
     v = np.hypot(vx, vy)
     if v == 0.0:
@@ -105,7 +99,7 @@ def analytic_linear(v0, angle_rad, b_coef):
 
 
 # -------------------------
-# Помощь: найти точку падения более точно (интерполяция линейная на последнем сегменте)
+# Поиск точки падения более точно (интерполяция линейная на последнем сегменте)
 # -------------------------
 def find_landing_time_and_x(sol):
     t = sol.t
