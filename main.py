@@ -12,20 +12,20 @@ from scipy.integrate import solve_ivp
 # -------------------------
 # Конфигурация (меняйте здесь)
 # -------------------------
-m = 0.2  # масса, кг
+m = 6.0  # масса, кг
 g = 9.81  # m/s^2
-v0 = 30.0  # начальная скорость, м/с
-angle_deg = 40.0  # угол броска, градусы
+v0 = 450.0  # начальная скорость, м/с
+angle_deg = 10.0  # угол броска, градусы
 model = 'both'  # 'none', 'linear', 'quadratic', 'both' (both = рисует всё для сравнения)
 
 # Линейная модель: F = -b v
 b = 0.1  # коэффициент сопротивления (Н·с/м). Эффективный; b/m = k с^{-1}
 
 # Квадратичная модель: F = -c v |v|
-c = 0.005  # коэффициент (примерно 0.5 * rho * Cd * A)
+c = 0.005
 
 # Решение ОДУ: параметры временного шага и максимум времени
-t_max = 30.0
+t_max = 100.0
 rtol = 1e-8
 atol = 1e-10
 
@@ -258,5 +258,48 @@ def main():
         plot_results(results, title_suffix=f" ({label})")
 
 
+def find_optimal_angle_by_scan(v0, b_coef, c_coef, t_max, model_types=('none', 'linear', 'quadratic'), angle_step=1):
+    angle_min = 5
+    angle_max = 85
+    angles = np.arange(angle_min, angle_max + angle_step, angle_step)
+
+    for model_type in model_types:
+        ranges = []
+        print(f"\nСканирование углов для модели: {model_type}")
+
+        for ang in angles:
+            res = run_experiment(v0, ang, model=model_type, b_coef=b_coef, c_coef=c_coef, t_max=t_max)
+            landing = res[model_type]['landing']
+            if landing is not None:
+                _, xf = landing
+                ranges.append(xf)
+                xf /= 1000
+                print(f"  Угол: {ang:.1f}° -> дальность: {xf:.2f} км")
+            else:
+                ranges.append(0.0)
+                print(f"  Угол: {ang:5.1f}° -> не упал (дальность = 0)")
+        ranges = np.array(ranges)
+        max_idx = np.argmax(ranges)
+        optimal_angle = angles[max_idx]
+        max_range = ranges[max_idx] / 1000
+
+        print(f"\n✅ Модель '{model_type}': оптимальный угол = {optimal_angle:.1f}°, дальность = {max_range:.2f} км")
+
+
 if __name__ == "__main__":
-    main()
+    # main()
+
+    print("\n" + "=" * 70)
+    print("ПОИСК ОПТИМАЛЬНОГО УГЛА ПЕРЕБОРОМ")
+    print("=" * 70)
+
+    models_to_scan = ['none', 'linear', 'quadratic']
+
+    find_optimal_angle_by_scan(
+        v0=v0,
+        b_coef=b,
+        c_coef=c,
+        t_max=t_max,
+        model_types=models_to_scan,
+        angle_step=1
+    )
