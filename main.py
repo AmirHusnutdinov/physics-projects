@@ -4,10 +4,10 @@ import math
 # -----------------------------
 # Входные данные
 # -----------------------------
-ANGLE_DEG = 15  # угол наклона в градусах
+ANGLE_DEG = 0  # угол наклона в градусах
 BALL_RADIUS = 20  # радиус шара
-MU_STATIC = 0.3  # коэффициент статического трения
-MU_KINETIC = 0.2  # коэффициент кинетического трения
+MU_STATIC = 0.25  # коэффициент статического трения
+MU_KINETIC = 0.05  # коэффициент кинетического трения
 g = 980  # ускорение (в пикселях/с², чтобы было видно движение)
 MASS = 1.0
 I = (2 / 5) * MASS * BALL_RADIUS**2  # момент инерции сплошного шара
@@ -19,7 +19,7 @@ INIT_X, INIT_Y = 150, 300
 # Pygame init
 # -----------------------------
 pygame.init()
-WIDTH, HEIGHT = 800, 600
+WIDTH, HEIGHT = 1800, 600
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
 clock = pygame.time.Clock()
 FONT = pygame.font.SysFont(None, 24)
@@ -38,7 +38,7 @@ cos_t = math.cos(theta)
 sin_t = math.sin(theta)
 
 
-def compute_incline_line(angle_deg, contact_point, length=700):
+def compute_incline_line(angle_deg, contact_point, length=4000):
     """Рисует наклонную плоскость длиной 'length', проходящую через contact_point под углом angle_deg к горизонту."""
     angle_rad = math.radians(angle_deg)
     cx = INIT_X - BALL_RADIUS * sin_t
@@ -74,8 +74,6 @@ omega = 0.0
 rotation_angle = 0.0
 t = 0.0
 dt = 0.01
-E_initial = None
-energy_history = []
 
 
 # -----------------------------
@@ -101,6 +99,7 @@ start_line, end_line = compute_incline_line(ANGLE_DEG, (contact_x, contact_y))
 # -----------------------------
 # Основной цикл
 # -----------------------------
+time = 0
 running = True
 while running:
     for event in pygame.event.get():
@@ -114,56 +113,51 @@ while running:
                 rotation_angle = 0.0
                 t = 0.0
                 E_initial = None
-                energy_history.clear()
 
     # -----------------------------
     # Физика
     # -----------------------------
-    N = MASS * g * cos_t  # нормальная сила
+    time += dt
+    N = MASS * g * cos_t
 
-    slip_speed = v_cm - omega * BALL_RADIUS
-    slipping = abs(slip_speed) > 1e-4
+    F_friction_req = (2 / 7) * MASS * g * sin_t
+    F_friction_max = MU_STATIC * N
+
+    print(F_friction_req, F_friction_max)
+    can_roll_without_slipping = F_friction_req <= F_friction_max
+
+    if can_roll_without_slipping and abs(v_cm) < 1e-6 and abs(omega) < 1e-6:
+        slipping = False
+    elif can_roll_without_slipping:
+        slip_speed = v_cm - omega * BALL_RADIUS
+        slipping = abs(slip_speed) > 1e-3
+    else:
+        slipping = True
 
     if not slipping:
-        F_static_needed = (2 / 7) * MASS * g * sin_t
-        if abs(F_static_needed) <= MU_STATIC * N:
-            # Чистое качение
-            a_cm = (5 / 7) * g * sin_t
-            alpha = a_cm / BALL_RADIUS
-            F_friction = F_static_needed
-        else:
-            slipping = True
-
-    if slipping:
-        direction = 1 if slip_speed > 0 else -1
+        a_cm = (5 / 7) * g * sin_t
+        alpha = a_cm / BALL_RADIUS
+    else:
+        slip_speed = v_cm - omega * BALL_RADIUS
+        direction = (
+            -1 if slip_speed > 0 else 1
+        ) 
         F_friction = MU_KINETIC * N * direction
-        a_cm = g * sin_t - (F_friction / MASS)
-        alpha = (F_friction * BALL_RADIUS) / I
+        a_cm = g * sin_t + (
+            F_friction / MASS
+        alpha = (
+            -(F_friction * BALL_RADIUS) / I
+        )
 
     # Обновление
     v_cm += a_cm * dt
     omega += alpha * dt
     s += v_cm * dt
-    rotation_angle += omega * dt
+    rotation_angle -= omega * dt
     t += dt
 
     # Получаем центр шара
     cx, cy = get_center_from_s(s)
-    # Энергия
-    height = cy - (contact_y + BALL_RADIUS * norm_y)  # относительно начальной высоты
-    # Но лучше: высота = начальная Y - текущая Y (в world coords, где Y вниз)
-    # В нашей системе: потенциальная энергия уменьшается при росте cy (т.к. Y вниз)
-    # Поэтому: h = INIT_Y - cy
-    h = INIT_Y - cy
-    E_pot = MASS * g * h
-    E_kin_trans = 0.5 * MASS * v_cm**2
-    E_kin_rot = 0.5 * I * omega**2
-    E_total = E_pot + E_kin_trans + E_kin_rot
-
-    if E_initial is None:
-        E_initial = E_total
-    energy_loss = E_initial - E_total
-
     # -----------------------------
     # Визуализация
     # -----------------------------
@@ -185,11 +179,11 @@ while running:
     info1 = FONT.render(f"v = {v_cm:.1f} px/s", True, BLACK)
     info2 = FONT.render(f"ω = {omega:.2f} rad/s", True, BLACK)
     info3 = FONT.render(f"Slipping: {'YES' if slipping else 'NO'}", True, BLACK)
-    info4 = FONT.render(f"Energy loss: {energy_loss:.2f}", True, BLACK)
+    info5 = FONT.render(f"Time {time:.3f}", True, BLACK)
     screen.blit(info1, (10, 10))
     screen.blit(info2, (10, 30))
     screen.blit(info3, (10, 50))
-    screen.blit(info4, (10, 70))
+    screen.blit(info5, (10, 90))
 
     pygame.display.flip()
     clock.tick(50)
