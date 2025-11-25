@@ -1,18 +1,19 @@
 import pygame
 import math
+import numpy as np
+from scipy.integrate import solve_ivp
 
 # -----------------------------
 # Входные данные
 # -----------------------------
-ANGLE_DEG = 15  # угол наклона в градусах
-BALL_RADIUS = 20  # радиус шара
-MU_STATIC = 0.35  # коэффициент статического трения
-MU_KINETIC = 0.05  # коэффициент кинетического трения
-g = 980  # ускорение (в пикселях/с², чтобы было видно движение)
+ANGLE_DEG = 15
+BALL_RADIUS = 20
+MU_STATIC = 0.15
+MU_KINETIC = 0.15
+g = 980
 MASS = 1.0
-I = (2 / 5) * MASS * BALL_RADIUS**2  # момент инерции сплошного шара
+I = (2 / 5) * MASS * BALL_RADIUS**2
 
-# Начальное положение ЦЕНТРА шара
 INIT_X, INIT_Y = 150, 300
 
 # -----------------------------
@@ -37,125 +38,110 @@ theta = math.radians(ANGLE_DEG)
 cos_t = math.cos(theta)
 sin_t = math.sin(theta)
 
-
-def compute_incline_line(angle_deg, contact_point, length=4000):
-    """Рисует наклонную плоскость длиной 'length', проходящую через contact_point под углом angle_deg к горизонту."""
-    angle_rad = math.radians(angle_deg)
-    cx = INIT_X - BALL_RADIUS * sin_t
-    cy = INIT_Y - BALL_RADIUS * cos_t
-
-    # Вектор вдоль плоскости
-    dx = math.cos(angle_rad)
-    dy = -math.sin(angle_rad)
-    # print(dx, dy)
-    # Начало и конец линии
-    x1 = cx - length * dx
-    y1 = cy - length * dy
-    x2 = cx + length * dx
-    y2 = cy + length * dy
-    return (x1, y1), (x2, y2)
-
-
-# Вектор вдоль плоскости (единичный)
-dir_x = math.cos(theta)
-dir_y = -math.sin(theta)
-
-# Перпендикуляр (нормаль вверх от плоскости)
+# Точка касания в начальный момент
 norm_x = math.sin(theta)
 norm_y = math.cos(theta)
-
-# Точка касания шара с плоскостью (на поверхности)
 contact_x = INIT_X - BALL_RADIUS * norm_x
 contact_y = INIT_Y - BALL_RADIUS * norm_y
 
-s = 0
-v_cm = 30.0  # скорость вдоль плоскости
-omega = 0.0
-rotation_angle = 0.0
-t = 0.0
-dt = 0.01
+dir_x = math.cos(theta)
+dir_y = -math.sin(theta)
+
+N = MASS * g * cos_t
+F_friction_req = (2 / 7) * MASS * g * sin_t
+F_friction_max = MU_STATIC * N
+print(F_friction_req, F_friction_max)
+can_roll_without_slipping = F_friction_req <= F_friction_max
 
 
 # -----------------------------
-# Вспомогательные функции
+# Дифференциальные уравнения
 # -----------------------------
+def equations(t, y):
+    s, v, omega, phi = y
+    slip_speed = v - omega * BALL_RADIUS
+    # print(abs(slip_speed), abs(2e-2 * v))
+    if can_roll_without_slipping and abs(slip_speed) <= abs(2e-2 * v):
+        # Чистое качение
+        a = (5 / 7) * g * sin_t
+        alpha = a / BALL_RADIUS
+    else:
+        # Скольжение
+        direction = -1 if slip_speed > 0 else 1
+        F_friction = MU_KINETIC * N * direction
+        a = g * sin_t + F_friction / MASS
+        alpha = -(F_friction * BALL_RADIUS) / I
+
+    return [v, a, alpha, omega]
+
+
+# -----------------------------
+# Предварительное интегрирование
+# -----------------------------
+t_span = (0, 10)  # 10 секунд моделирования
+y0 = [0.0, 0.0, 0.0, 0.0]  # [s, v_cm, omega, phi]
+t_eval = np.linspace(t_span[0], t_span[1], 1000)
+
+sol = solve_ivp(
+    equations,
+    t_span,
+    y0,
+    t_eval=t_eval,
+)
+
+times = sol.t
+s_vals = sol.y[0]
+v_vals = sol.y[1]
+omega_vals = sol.y[2]
+rotation_angle_vals = sol.y[3]
+
+
 def world_to_screen(x, y):
     return (x, HEIGHT - y)
 
 
 def get_center_from_s(s_val):
-    """Возвращает (x, y) центра шара по расстоянию s вдоль плоскости от точки касания."""
-    # Точка на плоскости на расстоянии s от contact
     px = contact_x + s_val * dir_x
     py = contact_y + s_val * dir_y
-    # Центр шара — на нормали на расстоянии R
-    cx = px + BALL_RADIUS * norm_x  # norm_x = sinθ
-    cy = py + BALL_RADIUS * norm_y  # norm_y = cosθ
+    cx = px + BALL_RADIUS * norm_x
+    cy = py + BALL_RADIUS * norm_y
     return cx, cy
 
 
-start_line, end_line = compute_incline_line(ANGLE_DEG, (contact_x, contact_y))
+start_line, end_line = (
+    (contact_x - 4000 * dir_x, contact_y - 4000 * dir_y),
+    (contact_x + 4000 * dir_x, contact_y + 4000 * dir_y),
+)
 
 # -----------------------------
-# Основной цикл
+# Основной цикл визуализации
 # -----------------------------
-time = 0
 running = True
+frame = 0
+frame_rate = 50  # кадров в секунду
+dt_frame = 1.0 / frame_rate
+
 while running:
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             running = False
         elif event.type == pygame.KEYDOWN:
             if event.key == pygame.K_r:
-                s = (INIT_X - contact_x) * dir_x + (INIT_Y - contact_y) * dir_y
-                v_cm = 0.0
-                omega = 0.0
-                rotation_angle = 0.0
-                t = 0.0
-                E_initial = None
+                frame = 0  # перезапуск анимации
 
-    # -----------------------------
-    # Физика
-    # -----------------------------
-    time += dt
-    N = MASS * g * cos_t
+    if frame >= len(times):
+        frame = len(times) - 1
 
-    F_friction_req = (2 / 7) * MASS * g * sin_t
-    F_friction_max = MU_STATIC * N
+    t = times[frame]
+    s = s_vals[frame]
+    v_cm = v_vals[frame]
+    omega = omega_vals[frame]
+    rotation_angle = -rotation_angle_vals[frame]
 
-    can_roll_without_slipping = F_friction_req <= F_friction_max
-    if time == dt:
-        print(F_friction_req, F_friction_max)
-    if can_roll_without_slipping and abs(v_cm) < 1e-6 and abs(omega) < 1e-6:
-        slipping = False
-    elif can_roll_without_slipping:
-        slip_speed = v_cm - omega * BALL_RADIUS
-        slipping = abs(slip_speed) > 1e-3
-    else:
-        slipping = True
-
-    if not slipping:
-        a_cm = (5 / 7) * g * sin_t
-        alpha = a_cm / BALL_RADIUS
-    else:
-        slip_speed = v_cm - omega * BALL_RADIUS
-        direction = -1 if slip_speed > 0 else 1
-        F_friction = MU_KINETIC * N * direction
-        a_cm = g * sin_t + (F_friction / MASS)
-        alpha = -(F_friction * BALL_RADIUS) / I
-
-    # Обновление
-    v_cm += a_cm * dt
-    omega += alpha * dt
-    s += v_cm * dt
-    rotation_angle -= omega * dt
-    t += dt
-
-    # Получаем центр шара
+    # Центр шара
     cx, cy = get_center_from_s(s)
-    # -----------------------------
-    # Энергия и момент импульса
-    # -----------------------------
+
+    # Энергии
     delta_h = -s * sin_t
     potential_energy = MASS * g * delta_h
     kinetic_trans = 0.5 * MASS * v_cm**2
@@ -167,39 +153,31 @@ while running:
     # Визуализация
     # -----------------------------
     screen.fill(WHITE)
-    # Рисуем плоскость
     pygame.draw.line(
         screen, GRAY, world_to_screen(*start_line), world_to_screen(*end_line), 6
     )
-
-    # Рисуем шар
     pygame.draw.circle(screen, RED, world_to_screen(cx, cy), BALL_RADIUS)
 
-    # Маркер вращения
     marker_x = cx + BALL_RADIUS * math.cos(rotation_angle)
     marker_y = cy + BALL_RADIUS * math.sin(rotation_angle)
     pygame.draw.circle(screen, BLUE, world_to_screen(marker_x, marker_y), 4)
 
-    # Информация
-    info1 = FONT.render(f"v = {v_cm:.1f} px/s", True, BLACK)
-    info2 = FONT.render(f"ω = {omega:.2f} rad/s", True, BLACK)
-    info3 = FONT.render(f"Slipping: {'YES' if slipping else 'NO'}", True, BLACK)
-    info4 = FONT.render(
+    # Текст
+    info = [
+        f"v = {v_cm:.1f} px/s",
+        f"ω = {omega:.2f} rad/s",
+        f"Slipping: {'YES' if not (can_roll_without_slipping and abs(v_cm - omega * BALL_RADIUS) <= abs(2e-2 * v_cm)) else 'NO'}",
         f"E_total = {total_energy:.1f}",
-        True,
-        BLACK,
-    )
-    info5 = FONT.render(f"Time {time:.3f}", True, BLACK)
-    info6 = FONT.render(f"L = {angular_momentum:.2f} (Iω)", True, BLACK)
-
-    screen.blit(info1, (10, 10))
-    screen.blit(info2, (10, 30))
-    screen.blit(info3, (10, 50))
-    screen.blit(info4, (10, 70))
-    screen.blit(info5, (10, 90))
-    screen.blit(info6, (10, 110))
+        f"Time = {t:.3f} s",
+        f"L = {angular_momentum:.2f} (Iω)",
+    ]
+    for i, txt in enumerate(info):
+        surf = FONT.render(txt, True, BLACK)
+        screen.blit(surf, (10, 10 + i * 20))
 
     pygame.display.flip()
-    clock.tick(50)
+    clock.tick(frame_rate)
+
+    frame += 1
 
 pygame.quit()
