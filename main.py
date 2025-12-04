@@ -1,305 +1,222 @@
-"""
-
-Реализация задачи "Полёт камня" с линейным и квадратичным сопротивлением.
-Конфигурация параметров в начале файла.
-
-"""
+from math import comb
 
 import matplotlib.pyplot as plt
 import numpy as np
-from scipy.integrate import solve_ivp
+from numba import jit
 
-# -------------------------
-# Конфигурация (меняйте здесь)
-# -------------------------
-m = 6.0  # масса, кг
-g = 9.81  # m/s^2
-v0 = 450.0  # начальная скорость, м/с
-angle_deg = 10.0  # угол броска, градусы
-model = 'both'  # 'none', 'linear', 'quadratic', 'both' (both = рисует всё для сравнения)
+# ===============================================================
+#                    ПАРАМЕТРЫ МОДЕЛИ
+# ===============================================================
+N = 1000  # чисто частиц
+L = 1.0  # длина ребра
+r = 0.001  # радиус частиц
+# phi = N * (4/3) * pi * r^3 формула для нахождения процента газа в нашем кубе если N = 1000 r = 0.01 то это 4%
+mass = 1.0
+dt = 0.002  # шаг интегрирования
+steps_eq = 7000  # время 1 эксперемента ну типа число шагов
+steps_stat = 30000  # сколько точек для гистограммы берем
 
-# Линейная модель: F = -b v
-b = 0.1  # коэффициент сопротивления (Н·с/м). Эффективный; b/m = k с^{-1}
-
-# Квадратичная модель: F = -c v |v|
-c = 0.005
-
-# Решение ОДУ: параметры временного шага и максимум времени
-t_max = 100.0
-rtol = 1e-8
-atol = 1e-10
-
-# Серия опытов (необязательно) -- уберите или добавьте значения, если хотите прогнать разные параметры
-series = [
-    {'v0': v0, 'angle_deg': angle_deg, 'label': 'базовый'},
-    # пример: {'v0': 40, 'angle_deg': 30, 'label': 'быстрый, малый угол'},
-]
+# ===============================================================
+#           ИНИЦИАЛИЗАЦИЯ КООРДИНАТ (без пересечений)
+# ===============================================================
+np.random.seed(42)  # для воспроизводимости
+pos = np.random.rand(N, 3) * (L - 2 * r) + r  # отступ от стенок
 
 
-# -------------------------
-# Функции: Правая часть для разных моделей
-# -------------------------
-def rhs_none(_, state):
-    """Без сопротивления"""
-    x, y, vx, vy = state
-    ax = 0.0
-    ay = -g
-    return [vx, vy, ax, ay]
+def ensure_no_overlap(pos, r):
+    # pos это список формы (N, 3), где:
+    # N — число частиц в системе,
+    # 3 — три пространственные координаты: x, y, z.
+
+    for i in range(N):
+        for j in range(i + 1, N):
+            dx = pos[i, 0] - pos[j, 0]
+            dy = pos[i, 1] - pos[j, 1]
+            dz = pos[i, 2] - pos[j, 2]
+            # просчитываем разность x/y/z-координат между i-ой j-ой частицой
+            # высчитываем квадрат расстояния межжу центрами частицы в 3D, но быстро,
+            # без необходимости не извлекаем корень
+            dist_sq = dx * dx + dy * dy + dz * dz
+
+            if dist_sq < (2 * r) ** 2:
+                dist = np.sqrt(dist_sq)  # вот тут мы и посчитали настоящее растояние
+                if dist < 1e-12:
+                    continue  # проверка на огрничения от железа
+                nx, ny, nz = dx / dist, dy / dist, dz / dist  # еденичный напрвленный вектор от j к i
+                overlap = 2 * r - dist
+                pos[j, 0] += nx * overlap
+                pos[j, 1] += ny * overlap
+                pos[j, 2] += nz * overlap  # смещаем j-ую частичу относительно i-ой
 
 
-def rhs_linear(_, state, b_coef):
-    x, y, vx, vy = state
-    k = b_coef / m
-    v = np.hypot(vx, vy)
-    # линейная модель по компонентам:
-    ax = -k * vx
-    ay = -g - k * vy
-    return [vx, vy, ax, ay]
+ensure_no_overlap(pos, r)
+
+# ===============================================================
+#      ИНИЦИАЛИЗАЦИЯ СКОРОСТЕЙ ПО МАКСВЕЛЛУ
+# ===============================================================
+temperature0 = 1.0  # какая-то безразмерная температура
+sigma = np.sqrt(temperature0 / mass)  # Это вычисление среднеквадратичного отклонения
+# одной компоненты скорости в распределении Максвелла–Больцмана.
+
+vel = np.random.normal(0, sigma, size=(N, 3))
+'''Генерирует массив случайных скоростей для всех N частиц.
+np.random.normal(loc, scale, size) — генерирует числа из нормального распределения:
+loc = 0 — математическое ожидание (среднее значение) = 0.
+scale = sigma — стандартное отклонение.
+size=(N, 3) — создаётся двумерный массив N строк × 3 столбца:
+Каждая строка — вектор скорости одной частицы: [v_x, v_y, v_z].
+Всего 3N независимых случайных чисел'''
+
+vel -= np.mean(vel, axis=0)  # убираем дрейф
+'''
+np.mean(vel, axis=0) vel — массив формы (N, 3).
+axis=0 — среднее по первой оси (по частицам), т.е. по строкам.
+Результат — вектор длины 3 vel -= ... Вычитает этот вектор из каждой строки массива vel
+'''
 
 
-def rhs_quadratic(_, state, c_coef):
-    x, y, vx, vy = state
-    v = np.hypot(vx, vy)
-    if v == 0.0:
-        ax = 0.0
-        ay = -g
-    else:
-        ax = - (c_coef / m) * v * vx
-        ay = -g - (c_coef / m) * v * vy
-    return [vx, vy, ax, ay]
+# ===============================================================
+#         УСКОРЕННЫЕ ФУНКЦИИ С JIT (numba)
+# ===============================================================
+
+@jit(nopython=True)  # это просто ускорение идет компеляция в машинный код
+def step_numba(pos, vel, L, r, mass, dt, momentum):  # momentum суммарный импульс,
+    # переданный всем шести стенкам за всё время симуляции
+
+    # --- 1. Движение методом Эйлера---
+    pos += vel * dt
+
+    # --- 2. Отражение от стенок + импульс ---
+    for i in range(pos.shape[0]):
+        for axis in range(3):
+            if pos[i, axis] < 0:  # Если частица ушла за левую стенку
+                vel[i, axis] *= -1
+                pos[i, axis] = 0
+                momentum[0] += 2 * mass * abs(vel[i, axis])  # Добавляем в momentum[0] импульс, переданный стенке
+
+            elif pos[i, axis] > L:
+                vel[i, axis] *= -1
+                pos[i, axis] = L
+                momentum[0] += 2 * mass * abs(vel[i, axis])
+
+    # --- 3. Столкновения частиц (O(N²), но JIT-ускорено) ---
+    for i in range(pos.shape[0]):
+        for j in range(i + 1, pos.shape[0]):
+            dx = pos[i, 0] - pos[j, 0]
+            dy = pos[i, 1] - pos[j, 1]
+            dz = pos[i, 2] - pos[j, 2]
+            dist_sq = dx * dx + dy * dy + dz * dz
+            d2 = 4 * r * r  # (2r)^2
+            # снова перебор всех частиц
+            if dist_sq < d2:
+                dist = np.sqrt(dist_sq)
+
+                inv_dist = 1.0 / (dist + 1e-12)
+                # мы избегаем деление на 0 и ускореям код так как деление медленне умножения
+                nx, ny, nz = dx * inv_dist, dy * inv_dist, dz * inv_dist
+
+                dvx = vel[i, 0] - vel[j, 0]
+                dvy = vel[i, 1] - vel[j, 1]
+                dvz = vel[i, 2] - vel[j, 2]
+                vn = dvx * nx + dvy * ny + dvz * nz
+
+                if vn < 0:  # движутся навстречу
+                    # обновляем скорости (упруго, одинаковые массы)
+
+                    vel[i, 0] -= vn * nx
+                    vel[i, 1] -= vn * ny
+                    vel[i, 2] -= vn * nz
+
+                    vel[j, 0] += vn * nx
+                    vel[j, 1] += vn * ny
+                    vel[j, 2] += vn * nz
+
+                    # раздвигаем, чтобы избежать залипания
+                    overlap = 2 * r - dist
+                    pos[i, 0] += nx * (overlap * 0.5)
+                    pos[i, 1] += ny * (overlap * 0.5)
+                    pos[i, 2] += nz * (overlap * 0.5)
+                    pos[j, 0] -= nx * (overlap * 0.5)
+                    pos[j, 1] -= ny * (overlap * 0.5)
+                    pos[j, 2] -= nz * (overlap * 0.5)
 
 
-# -------------------------
-# Аналитические формулы
-# -------------------------
-def analytic_no_drag(v0, angle_rad):
-    """Классический случай без сопротивления"""
-    v0x = v0 * np.cos(angle_rad)
-    v0y = v0 * np.sin(angle_rad)
-    t_fall = 2.0 * v0y / g
-    range_ = v0x * t_fall
-    h_max = v0y ** 2 / (2.0 * g)
-    return {'t_fall': t_fall, 'range': range_, 'h_max': h_max}
+# ===============================================================
+#                   ЭТАП 1: РАВНОВЕСИЕ
+# ===============================================================
+momentum = np.array([0.0])  # numba требует массив
+
+for step_num in range(steps_eq):
+    step_numba(pos, vel, L, r, mass, dt, momentum)
+    if step_num % 1000 == 0:
+        print(f"Equilibration: {step_num}/{steps_eq}")
+# Прогон системы до установления стационарного распределения
+# Вывод каждые 1000 шагов — для контроля прогресса
 
 
-def analytic_linear(v0, angle_rad, b_coef):
-    """
-    Выражения для скоростей и положений при линейном сопротивлении F=-b v.
-    k = b/m.
-    vx(t) = v0x * exp(-k t)
-    x(t) = v0x / k * (1 - exp(-k t))
-    vy(t) = (v0y + g/k) * exp(-k t) - g/k
-    y(t) = (v0y + g/k)/k * (1 - exp(-k t)) - g*t/k
-    (приведен вид, который можно вычислить численно)
-    """
-    k = b_coef / m
-    v0x = v0 * np.cos(angle_rad)
-    v0y = v0 * np.sin(angle_rad)
-    return {'k': k, 'v0x': v0x, 'v0y': v0y}
+# Вычисляем температуру
+# np.sum(..., axis=1) — сумма квадратов по осям → v_i² для каждой частицы
+# KE — массив кинетических энергий частиц
 
+KE = 0.5 * mass * np.sum(vel ** 2, axis=1)
+# Связь температуры и средней кинетической энергии в 3D
+T_model = (2 / 3) * np.mean(KE)
+print("\n🔹 Температура:", T_model)
 
-# -------------------------
-# Поиск точки падения более точно (интерполяция линейная на последнем сегменте)
-# -------------------------
-def find_landing_time_and_x(sol):
-    t = sol.t
-    y = sol.y[1]
-    x = sol.y[0]
-    if np.all(y >= 0):
-        # не упал в пределах tspan
-        return None
-    # найдём последний индекс где y>0
-    idx = np.where(y >= 0)[0]
-    if len(idx) == 0:
-        # стартовали под землёй
-        return t[0], x[0]
-    i = idx[-1]
-    t1, y1, x1 = t[i], y[i], x[i]
-    t2, y2, x2 = t[i + 1], y[i + 1], x[i + 1]
-    # линейная интерполяция по y==0
-    if y2 == y1:
-        tf = t2
-        xf = x2
-    else:
-        alpha = -y1 / (y2 - y1)
-        tf = t1 + alpha * (t2 - t1)
-        xf = x1 + alpha * (x2 - x1)
-    return tf, xf
+# Давление
+# Импульс, переданный всем 6 стенкам: momentum[0].
+# Время моделирования: T = steps_eq * dt.
+# Суммарная площадь всех стенок: 6 * L² = 6 * area.
+# Давление — сила на единицу площади, сила — импульс в единицу времени:
+area = L * L
+P_model = momentum[0] / (steps_eq * dt * 6 * area)
+P_ideal = N * T_model / (L ** 3)
+print("🔹 P_model =", P_model)
+print("🔹 P_ideal =", P_ideal)
+print("🔹 P_model / P_ideal =", P_model / P_ideal)
+print("Отношение >1 → система не идеальна по уравнению Ван-дер-Ваальса")
 
+# ===============================================================
+#           ЭТАП 2: M7C — ФЛУКТУАЦИИ
+# ===============================================================
+left_counts = np.empty(steps_stat, dtype=np.int32)
+# left_counts — массив для хранения k(t): число частиц с x < L/2 в каждый момент времени.
+momentum[0] = 0.0  # сброс импульса
 
-# -------------------------
-# Функция запуска одного опыта
-# -------------------------
-def run_experiment(v0, angle_deg, model, b_coef, c_coef, t_max):
-    angle = np.deg2rad(angle_deg)
-    v0x = v0 * np.cos(angle)
-    v0y = v0 * np.sin(angle)
-    state0 = [0.0, 0.0, v0x, v0y]
-    t_span = (0.0, t_max)
+print("\n🔹 Сбор статистики флуктуаций...")
 
-    results = {}
+for i in range(steps_stat):
+    step_numba(pos, vel, L, r, mass, dt, momentum)
+    left_counts[i] = np.sum(pos[:, 0] < L / 2)
+    if i % 1000 == 0:
+        print(f"  {i}/{steps_stat}", end='\r')
 
-    if model in ('none', 'both'):
-        sol_none = solve_ivp(rhs_none, t_span, state0, max_step=0.05, rtol=rtol, atol=atol, dense_output=True)
-        land_none = find_landing_time_and_x(sol_none)
-        results['none'] = {'sol': sol_none, 'landing': land_none}
+print(f"\n✅ Сбор завершён. Среднее слева: {left_counts.mean():.1f} / {N / 2}")
 
-    if model in ('linear', 'both'):
-        sol_lin = solve_ivp(lambda t, y: rhs_linear(t, y, b_coef), t_span, state0, max_step=0.05, rtol=rtol, atol=atol,
-                            dense_output=True)
-        land_lin = find_landing_time_and_x(sol_lin)
-        results['linear'] = {'sol': sol_lin, 'landing': land_lin}
+# ===============================================================
+#       ТЕОРИЯ + ГРАФИК
+# ===============================================================
+values = np.arange(0, N + 1)
+binom_dist = np.array([comb(N, k) * 0.5 ** N for k in values])
 
-    if model in ('quadratic', 'both'):
-        sol_quad = solve_ivp(lambda t, y: rhs_quadratic(t, y, c_coef), t_span, state0, max_step=0.02, rtol=rtol,
-                             atol=atol, dense_output=True)
-        land_quad = find_landing_time_and_x(sol_quad)
-        results['quadratic'] = {'sol': sol_quad, 'landing': land_quad}
+plt.figure(figsize=(10, 5))
+hist, _ = np.histogram(left_counts, bins=np.arange(N + 2), density=True)
+plt.step(np.arange(N + 1), hist, where='mid', label="3D Simulation", linewidth=2)
 
-    return results
+plt.plot(values, binom_dist, 'ro-', markersize=3, label="Binomial theory", alpha=0.7)
 
-
-# -------------------------
-# Визуализация и прогон серии
-# -------------------------
-def plot_results(results_dict, title_suffix=''):
-    plt.figure(figsize=(14, 8))
-    all_x = []
-    all_y = []
-
-    for key, val in results_dict.items():
-        sol = val['sol']
-        x = sol.y[0]
-        y = sol.y[1]
-        label = key
-        plt.plot(x, y, label=label, linewidth=2)
-        all_x.extend(x)
-        all_y.extend(y)
-
-        landing = val['landing']
-        if landing is not None:
-            tf, xf = landing
-            plt.plot([xf], [0.0], 'o')
-            plt.annotate(
-                f'{key}\n x={xf:.2f} m, t={tf:.2f} s',
-                xy=(xf, 0), xycoords='data',
-                xytext=(20, 15), textcoords='offset points',
-                arrowprops=dict(arrowstyle="->", lw=0.8),
-                fontsize=9, bbox=dict(boxstyle="round,pad=0.3", fc="w", alpha=0.7)
-            )
-
-    # Автоматический масштаб по данным
-    x_min, x_max = min(all_x), max(all_x)
-    y_min, y_max = 0, max(all_y)  # y_min = 0 (земля), y_max — макс высота
-
-    # Добавляем небольшой запас (например, 10% сверху и справа)
-    padding_x = 0.1 * (x_max - x_min)
-    padding_y = 0.1 * y_max
-
-    plt.xlim(x_min - padding_x, x_max + padding_x)
-    plt.ylim(-0.1, y_max + padding_y)
-
-    plt.xlabel('x, м')
-    plt.ylabel('y, м')
-    plt.title('Траектории (без сопротивления / линейное / квадратичное) ' + title_suffix)
-    plt.grid(True)
-    plt.legend()
-    plt.tight_layout()
-    plt.xlim(0, 1000)  # от 0 до 1000 метров
-    plt.xticks(np.arange(0, x_max + 50, 50))
-    plt.yticks(np.arange(0, y_max + 20, 20))
-    plt.show()
-
-
-# -------------------------
-# Главная логика: серия запусков
-# -------------------------
-def main():
-    global series
-    # если series пуст, взять один опыт из конфигурации
-    if not series:
-        run_list = [{'v0': v0, 'angle_deg': angle_deg, 'label': 'один'}]
-    else:
-        run_list = series
-
-    for exp in run_list:
-        v0_e = exp.get('v0', v0)
-        angle_e = exp.get('angle_deg', angle_deg)
-        label = exp.get('label', '')
-
-        print(f"\n=== Эксперимент: {label} v0={v0_e} m/s, angle={angle_e} deg ===")
-
-        # аналитика без сопротивления
-        an = analytic_no_drag(v0_e, np.deg2rad(angle_e))
-        print("Аналитика (без сопротивления):")
-        print(f"  Время полёта: {an['t_fall']:.4f} s, Дальность: {an['range']:.4f} m, Макс высота: {an['h_max']:.4f} m")
-
-        # аналитика линейная (параметры)
-        an_lin = analytic_linear(v0_e, np.deg2rad(angle_e), b)
-        print(f"  Линейная модель: k = b/m = {an_lin['k']:.6f} 1/s")
-
-        results = run_experiment(v0_e, angle_e, model, b, c, t_max)
-
-        # печать результатов
-        for key, val in results.items():
-            landing = val['landing']
-            if landing is None:
-                print(f"  {key}: не упал в пределах t_max={t_max}s")
-            else:
-                tf, xf = landing
-                sol = val['sol']
-                # максимальная высота (по массиву)
-                ymax = np.max(sol.y[1])
-                imax = np.argmax(sol.y[1])
-                vx_at_max = sol.y[2, imax]
-                vy_at_max = sol.y[3, imax]
-                print(f"  {key}: t_fall = {tf:.4f} s, range = {xf:.4f} m, y_max = {ymax:.4f} m")
-
-        plot_results(results, title_suffix=f" ({label})")
-
-
-def find_optimal_angle_by_scan(v0, b_coef, c_coef, t_max, model_types=('none', 'linear', 'quadratic'), angle_step=1):
-    angle_min = 5
-    angle_max = 85
-    angles = np.arange(angle_min, angle_max + angle_step, angle_step)
-
-    for model_type in model_types:
-        ranges = []
-        print(f"\nСканирование углов для модели: {model_type}")
-
-        for ang in angles:
-            res = run_experiment(v0, ang, model=model_type, b_coef=b_coef, c_coef=c_coef, t_max=t_max)
-            landing = res[model_type]['landing']
-            if landing is not None:
-                _, xf = landing
-                ranges.append(xf)
-                xf /= 1000
-                print(f"  Угол: {ang:.1f}° -> дальность: {xf:.2f} км")
-            else:
-                ranges.append(0.0)
-                print(f"  Угол: {ang:5.1f}° -> не упал (дальность = 0)")
-        ranges = np.array(ranges)
-        max_idx = np.argmax(ranges)
-        optimal_angle = angles[max_idx]
-        max_range = ranges[max_idx] / 1000
-
-        print(f"\n✅ Модель '{model_type}': оптимальный угол = {optimal_angle:.1f}°, дальность = {max_range:.2f} км")
-
-
-if __name__ == "__main__":
-    # main()
-
-    print("\n" + "=" * 70)
-    print("ПОИСК ОПТИМАЛЬНОГО УГЛА ПЕРЕБОРОМ")
-    print("=" * 70)
-
-    models_to_scan = ['none', 'linear', 'quadratic']
-
-    find_optimal_angle_by_scan(
-        v0=v0,
-        b_coef=b,
-        c_coef=c,
-        t_max=t_max,
-        model_types=models_to_scan,
-        angle_step=1
-    )
+# Добавим параметры
+mu_th = N / 2
+sigma_th = np.sqrt(N / 4)
+mu_sim = left_counts.mean()
+sigma_sim = left_counts.std()
+plt.axvline(mu_th, color='k', linestyle='--', alpha=0.5, label=f"Theory: μ={mu_th:.0f}, σ={sigma_th:.1f}")
+plt.axvline(mu_sim, color='b', linestyle=':', alpha=0.7, label=f"Sim: μ={mu_sim:.1f}, σ={sigma_sim:.1f}")
+# σ - это мера разброса — насколько сильно значения k отклоняются от среднего.
+plt.xlabel("Число частиц в левой половине")
+plt.ylabel("Вероятность")
+plt.title(f"Флуктуации числа частиц (N={N}, r={r})")
+plt.legend()
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.show()
